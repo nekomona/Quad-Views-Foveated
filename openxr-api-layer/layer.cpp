@@ -246,6 +246,8 @@ namespace openxr_api_layer {
                         if (!m_forceNoEyeTracking) {
                             if (m_debugSimulateTracking) {
                                 m_trackerType = Tracker::SimulatedTracking;
+                            } else if (m_oscTrackingEnabled) {
+                                m_trackerType = Tracker::OSCTracking;
                             } else if (eyeGazeInteractionProperties.supportsEyeGazeInteraction) {
                                 // Prefer the eye gaze interaction extension over the social eye tracking extension.
                                 m_trackerType = Tracker::EyeGazeInteraction;
@@ -683,6 +685,10 @@ namespace openxr_api_layer {
                         case Tracker::EyeGazeInteraction:
                             initializeEyeGazeInteraction(*session);
                             break;
+
+                        case Tracker::OSCTracking:
+                            initializeOSCTracking(*session);
+                            break;
                         }
 
                         XrReferenceSpaceCreateInfo spaceCreateInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
@@ -744,6 +750,11 @@ namespace openxr_api_layer {
 
                     m_gazeSpaces.clear();
                     m_swapchains.clear();
+
+                    if (m_oscClient) {
+                        m_oscClient->Shutdown();
+                        m_oscClient.reset();
+                    }
 
                     m_session = XR_NULL_HANDLE;
                 }
@@ -2075,6 +2086,20 @@ namespace openxr_api_layer {
                               TLXArg(m_eyeSpace, "ActionSpace"));
         }
 
+        void initializeOSCTracking(XrSession session) {
+            m_oscClient = std::make_unique<OSCClient>(m_oscAddress.c_str(), m_oscPort);
+            if (m_oscClient->Initialize()) {
+                Log(fmt::format("OSC tracking initialized on {}:{}\n", m_oscAddress, m_oscPort));
+                TraceLoggingWrite(g_traceProvider,
+                                  "OSCTracking",
+                                  TLArg(m_oscAddress.c_str(), "Address"),
+                                  TLArg(m_oscPort, "Port"));
+            } else {
+                Log("Warning: Failed to initialize OSC tracking\n");
+                m_oscClient.reset();
+            }
+        }
+
         bool getSimulatedTracking(XrTime time, bool getStateOnly, XrVector3f& unitVector) {
             // Use the mouse to simulate eye tracking.
             if (!getStateOnly) {
@@ -2166,6 +2191,26 @@ namespace openxr_api_layer {
             return true;
         }
 
+        bool getOSCTracking(XrTime time, bool getStateOnly, XrVector3f& unitVector) {
+            if (!m_oscClient || !m_oscClient->IsConnected()) {
+                return false;
+            }
+
+            if (!m_oscClient->HasValidGaze()) {
+                return false;
+            }
+
+            if (m_oscClient->IsDataStale(m_oscTimeoutMs)) {
+                return false;
+            }
+
+            if (!getStateOnly) {
+                unitVector = m_oscClient->GetGazeVector();
+            }
+
+            return true;
+        }
+
         bool getEyeGaze(XrTime time, bool getStateOnly, XrVector3f& unitVector) {
             // Clear the cache.
             const auto now = std::chrono::steady_clock::now();
@@ -2177,6 +2222,10 @@ namespace openxr_api_layer {
             switch (m_trackerType) {
             case Tracker::SimulatedTracking:
                 result = getSimulatedTracking(time, getStateOnly, unitVector);
+                break;
+
+            case Tracker::OSCTracking:
+                result = getOSCTracking(time, getStateOnly, unitVector);
                 break;
 
             case Tracker::EyeTrackerFB:
@@ -3024,6 +3073,18 @@ namespace openxr_api_layer {
                     } else if (name == "debug_keys") {
                         m_debugKeys = std::stoi(value);
                         parsed = true;
+                    } else if (name == "osc_tracking_enabled") {
+                        m_oscTrackingEnabled = std::stoi(value) != 0;
+                        parsed = true;
+                    } else if (name == "osc_address") {
+                        m_oscAddress = value;
+                        parsed = true;
+                    } else if (name == "osc_port") {
+                        m_oscPort = std::stoi(value);
+                        parsed = true;
+                    } else if (name == "osc_timeout_ms") {
+                        m_oscTimeoutMs = std::stoull(value);
+                        parsed = true;
                     } else {
                         Log("L%u: Unrecognized option\n", lineNumber);
                     }
@@ -3052,6 +3113,7 @@ namespace openxr_api_layer {
         enum Tracker {
             None = 0,
             SimulatedTracking,
+            OSCTracking,
             EyeTrackerFB,
             EyeGazeInteraction,
         };
@@ -3162,6 +3224,13 @@ namespace openxr_api_layer {
         bool m_debugEyeGaze{false};
         bool m_debugSimulateTracking{false};
         bool m_debugKeys{false};
+
+        // OSC tracking configuration.
+        bool m_oscTrackingEnabled{false};
+        std::string m_oscAddress{"127.0.0.1"};
+        int m_oscPort{9000};
+        uint64_t m_oscTimeoutMs{500};
+        std::unique_ptr<OSCClient> m_oscClient{nullptr};
 
         std::shared_ptr<general::ITimer> m_appFrameCpuTimer;
         std::shared_ptr<general::ITimer> m_appRenderCpuTimer;

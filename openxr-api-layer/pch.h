@@ -54,6 +54,8 @@ using namespace std::chrono_literals;
 // Windows header files.
 #define WIN32_LEAN_AND_MEAN // Exclude rarely-used stuff from Windows headers
 #define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <unknwn.h>
 #include <wrl.h>
@@ -99,3 +101,4 @@ using Microsoft::WRL::ComPtr;
 #endif
 
 #include <utils/inputs.h>
+#include <utils/osc_client.h>
