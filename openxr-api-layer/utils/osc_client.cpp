@@ -108,8 +108,11 @@ bool OSCClient::HasValidGaze() const {
     return m_hasValidLeftEye.load() || m_hasValidRightEye.load();
 }
 
-void OSCClient::SetEyeYUpScale(float scale) {
-    m_eyeYUpScale = scale;
+void OSCClient::SetEyeCurveExponents(float up, float down, float left, float right) {
+    m_eyeCurveExponentUp = up;
+    m_eyeCurveExponentDown = down;
+    m_eyeCurveExponentLeft = left;
+    m_eyeCurveExponentRight = right;
 }
 
 bool OSCClient::IsDataStale(uint64_t timeoutMs) const {
@@ -287,16 +290,31 @@ void OSCClient::HandleLeftRightPitchYaw(float leftPitch, float leftYaw, float ri
     // Convert pitch/yaw angles (radians) back to normalized [-1, 1] coordinates.
     // VRCFT sends atan()-based angles; tan() recovers the original normalized values,
     // allowing the existing NormalizedToUnitVector to work unchanged.
-    m_eyeLeftY = std::tan(-leftPitch / 180 * M_PI);
-    m_eyeLeftX = std::tan(leftYaw / 180 * M_PI);
-    m_eyeRightY = std::tan(-rightPitch / 180 * M_PI);
-    m_eyeRightX = std::tan(rightYaw / 180 * M_PI);
+    m_eyeLeftY = std::tan(-leftPitch / 180 * (float)M_PI);
+    m_eyeLeftX = std::tan(leftYaw / 180 * (float)M_PI);
+    m_eyeRightY = std::tan(-rightPitch / 180 * (float)M_PI);
+    m_eyeRightX = std::tan(rightYaw / 180 * (float)M_PI);
 
+    // Apply per-direction response curve exponents.
     if (m_eyeLeftY > .0f) {
-        m_eyeLeftY *= m_eyeYUpScale;
+        m_eyeLeftY = std::pow(m_eyeLeftY, m_eyeCurveExponentUp);
+    } else {
+        m_eyeLeftY = -std::pow(-m_eyeLeftY, m_eyeCurveExponentDown);
     }
     if (m_eyeRightY > .0f) {
-        m_eyeRightY *= m_eyeYUpScale;
+        m_eyeRightY = std::pow(m_eyeRightY, m_eyeCurveExponentUp);
+    } else {
+        m_eyeRightY = -std::pow(-m_eyeRightY, m_eyeCurveExponentDown);
+    }
+    if (m_eyeLeftX > .0f) {
+        m_eyeLeftX = std::pow(m_eyeLeftX, m_eyeCurveExponentRight);
+    } else {
+        m_eyeLeftX = -std::pow(-m_eyeLeftX, m_eyeCurveExponentLeft);
+    }
+    if (m_eyeRightX > .0f) {
+        m_eyeRightX = std::pow(m_eyeRightX, m_eyeCurveExponentRight);
+    } else {
+        m_eyeRightX = -std::pow(-m_eyeRightX, m_eyeCurveExponentLeft);
     }
 
     m_lastLeftEyeUpdate = now;
