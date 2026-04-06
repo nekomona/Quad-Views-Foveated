@@ -47,6 +47,9 @@ class OSCClient {
     XrVector3f GetGazeVector() const;
     bool IsDataStale(uint64_t timeoutMs) const;
 
+    // Set the scale factor applied to upward Y values (0.0-1.0, default 0.8).
+    void SetEyeYUpScale(float scale);
+
     // Thread function for background receive.
     void ReceiveThread();
 
@@ -67,6 +70,7 @@ class OSCClient {
     std::atomic<bool> m_hasValidLeftEye{false};
     std::atomic<bool> m_hasValidRightEye{false};
     std::atomic<bool> m_loggedFirstData{false};
+    float m_eyeYUpScale{0.8f};
     std::chrono::time_point<std::chrono::steady_clock> m_lastLeftEyeUpdate{};
     std::chrono::time_point<std::chrono::steady_clock> m_lastRightEyeUpdate{};
 

@@ -2088,6 +2088,7 @@ namespace openxr_api_layer {
 
         void initializeOSCTracking(XrSession session) {
             m_oscClient = std::make_unique<OSCClient>(m_oscAddress.c_str(), m_oscPort);
+            m_oscClient->SetEyeYUpScale(m_oscEyeYUpScale);
             if (m_oscClient->Initialize()) {
                 Log(fmt::format("OSC tracking initialized on {}:{}\n", m_oscAddress, m_oscPort));
                 TraceLoggingWrite(g_traceProvider,
@@ -3085,6 +3086,9 @@ namespace openxr_api_layer {
                     } else if (name == "osc_timeout_ms") {
                         m_oscTimeoutMs = std::stoull(value);
                         parsed = true;
+                    } else if (name == "osc_eye_upscale") {
+                        m_oscEyeYUpScale = std::stof(value);
+                        parsed = true;
                     } else {
                         Log("L%u: Unrecognized option\n", lineNumber);
                     }
@@ -3230,6 +3234,7 @@ namespace openxr_api_layer {
         std::string m_oscAddress{"127.0.0.1"};
         int m_oscPort{9000};
         uint64_t m_oscTimeoutMs{500};
+        float m_oscEyeYUpScale{0.8f};
         std::unique_ptr<OSCClient> m_oscClient{nullptr};
 
         std::shared_ptr<general::ITimer> m_appFrameCpuTimer;

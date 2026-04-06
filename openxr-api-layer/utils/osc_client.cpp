@@ -108,6 +108,10 @@ bool OSCClient::HasValidGaze() const {
     return m_hasValidLeftEye.load() || m_hasValidRightEye.load();
 }
 
+void OSCClient::SetEyeYUpScale(float scale) {
+    m_eyeYUpScale = scale;
+}
+
 bool OSCClient::IsDataStale(uint64_t timeoutMs) const {
     auto now = std::chrono::steady_clock::now();
 
@@ -359,6 +363,9 @@ void OSCClient::UpdateEyeParameter(const char* address, float value) {
             m_eyeLeftX = value;
         } else {
             m_eyeLeftY = value;
+            if (m_eyeLeftY > .0f) {
+                m_eyeLeftY *= m_eyeYUpScale;
+            }
         }
         m_lastLeftEyeUpdate = now;
         m_hasValidLeftEye.store(true);
@@ -369,6 +376,9 @@ void OSCClient::UpdateEyeParameter(const char* address, float value) {
             m_eyeRightX = value;
         } else {
             m_eyeRightY = value;
+            if (m_eyeRightY > .0f) {
+                m_eyeRightY *= m_eyeYUpScale;
+            }
         }
         m_lastRightEyeUpdate = now;
         m_hasValidRightEye.store(true);
