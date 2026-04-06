@@ -56,6 +56,9 @@
     <ClInclude Include="resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="utils\osc_client.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -93,6 +96,9 @@
     </ClCompile>
     <ClCompile Include="..\external\fmt\src\format.cc">
       <Filter>fmt</Filter>
+    </ClCompile>
+    <ClCompile Include="utils\osc_client.cpp">
+      <Filter>Utilities</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
