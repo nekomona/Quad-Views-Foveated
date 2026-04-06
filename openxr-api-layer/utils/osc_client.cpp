@@ -1,0 +1,350 @@
+// MIT License
+//
+// Copyright(c) 2022-2023 Matthieu Bucchianeri
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this softwareand associated documentation files(the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions :
+//
+// The above copyright noticeand this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#include "pch.h"
+#include "osc_client.h"
+#include "framework/log.h"
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#include <cstring>
+#include <cstdlib>
+
+OSCClient::OSCClient(const char* address, int port) : m_address(address), m_port(port), m_socket(nullptr) {
+}
+
+OSCClient::~OSCClient() {
+    Shutdown();
+}
+
+bool OSCClient::Initialize() {
+    WSADATA wsaData;
+    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (result != 0) {
+        return false;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) {
+        WSACleanup();
+        return false;
+    }
+
+    // Allow address reuse so we can bind even if there's a lingering socket.
+    BOOL reuseAddr = TRUE;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuseAddr, sizeof(reuseAddr));
+
+    // Set receive timeout to allow graceful thread exit.
+    DWORD timeoutMs = 100;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
+
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons((u_short)m_port);
+    inet_pton(AF_INET, m_address.c_str(), &serverAddr.sin_addr);
+
+    if (bind(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        closesocket(sock);
+        WSACleanup();
+        return false;
+    }
+
+    // Increase receive buffer size.
+    int rcvbuf = 65536;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&rcvbuf, sizeof(rcvbuf));
+
+    m_socket = (void*)sock;
+    m_connected.store(true);
+    m_running.store(true);
+
+    m_receiveThread = std::thread(&OSCClient::ReceiveThread, this);
+
+    return true;
+}
+
+void OSCClient::Shutdown() {
+    m_running.store(false);
+
+    if (m_receiveThread.joinable()) {
+        m_receiveThread.join();
+    }
+
+    if (m_socket) {
+        closesocket((SOCKET)m_socket);
+        m_socket = nullptr;
+    }
+
+    m_connected.store(false);
+    WSACleanup();
+}
+
+bool OSCClient::IsConnected() const {
+    return m_connected.load();
+}
+
+bool OSCClient::HasValidGaze() const {
+    return m_hasValidLeftEye.load() || m_hasValidRightEye.load();
+}
+
+void OSCClient::SetEyeCurveExponents(float up, float down, float left, float right) {
+    m_eyeCurveExponentUp = up;
+    m_eyeCurveExponentDown = down;
+    m_eyeCurveExponentLeft = left;
+    m_eyeCurveExponentRight = right;
+}
+
+bool OSCClient::IsDataStale(uint64_t timeoutMs) const {
+    auto now = std::chrono::steady_clock::now();
+
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+
+    bool hasLeft = m_hasValidLeftEye.load();
+    bool hasRight = m_hasValidRightEye.load();
+
+    if (!hasLeft && !hasRight) {
+        return true;
+    }
+
+    auto lastUpdate = now;
+    if (hasLeft && hasRight) {
+        lastUpdate = std::max(m_lastLeftEyeUpdate, m_lastRightEyeUpdate);
+    } else if (hasLeft) {
+        lastUpdate = m_lastLeftEyeUpdate;
+    } else {
+        lastUpdate = m_lastRightEyeUpdate;
+    }
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate).count();
+    return (uint64_t)elapsed > timeoutMs;
+}
+
+XrVector3f OSCClient::GetGazeVector() const {
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+
+    bool hasLeft = m_hasValidLeftEye.load();
+    bool hasRight = m_hasValidRightEye.load();
+
+    if (!hasLeft && !hasRight) {
+        return {0.f, 0.f, -1.f}; // Default forward
+    }
+
+    if (hasLeft && hasRight) {
+        const float avgX = (m_eyeLeftX + m_eyeRightX) * 0.5f;
+        const float avgY = (m_eyeLeftY + m_eyeRightY) * 0.5f;
+        return NormalizedToUnitVector(avgX, avgY);
+    } else if (hasLeft) {
+        return NormalizedToUnitVector(m_eyeLeftX, m_eyeLeftY);
+    } else {
+        return NormalizedToUnitVector(m_eyeRightX, m_eyeRightY);
+    }
+}
+
+void OSCClient::ReceiveThread() {
+    char buffer[4096];
+
+    while (m_running.load()) {
+        sockaddr_in senderAddr{};
+        int senderAddrSize = sizeof(senderAddr);
+
+        int recvSize = recvfrom(
+            (SOCKET)m_socket, buffer, sizeof(buffer), 0, (sockaddr*)&senderAddr, &senderAddrSize);
+
+        if (!m_running.load()) {
+            break;
+        }
+
+        if (recvSize == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT || err == WSAEWOULDBLOCK) {
+                continue;
+            }
+            // Socket error - disconnected.
+            m_connected.store(false);
+            break;
+        }
+
+        if (recvSize > 0) {
+            ParseOSCMessage(buffer, recvSize);
+        }
+    }
+}
+
+bool OSCClient::ParseOSCMessage(const char* buffer, int size) {
+    // OSC 1.0 message format:
+    // 1. Address Pattern (4-byte aligned null-terminated string)
+    // 2. Type Tag String (4-byte aligned, starts with ',')
+    // 3. Arguments (4-byte aligned)
+
+    if (size < 4) {
+        return false;
+    }
+
+    // Extract address pattern.
+    int addrLen = 0;
+    while (addrLen < size && buffer[addrLen] != '\0') {
+        addrLen++;
+    }
+    if (addrLen >= size) {
+        return false;
+    }
+
+    std::string address(buffer, addrLen);
+    
+    // Skip past address + null terminator + padding to 4-byte boundary.
+    int offset = addrLen + 1;
+    offset = (offset + 3) & ~3;
+
+    if (offset >= size) {
+        return false;
+    }
+
+    // Check if this is a bundle message (starts with "#bundle").
+    if (address == "#bundle") {
+        // Skip the 8-byte time tag.
+        offset += 8;
+
+        // Parse contained messages.
+        while (offset + 4 <= size) {
+            // Read the size of the contained element.
+            uint32_t elementSize;
+            memcpy(&elementSize, buffer + offset, 4);
+            // OSC uses big-endian.
+            elementSize = _byteswap_ulong(elementSize);
+            offset += 4;
+
+            if (offset + (int)elementSize > size) {
+                break;
+            }
+
+            ParseOSCMessage(buffer + offset, elementSize);
+            offset += elementSize;
+        }
+        return true;
+    }
+
+    // Check for type tag string.
+    if (buffer[offset] != ',') {
+        return false;
+    }
+
+    // Extract type tags.
+    int typeTagStart = offset + 1;
+    int typeTagLen = 0;
+    while (offset + typeTagLen < size && buffer[typeTagStart + typeTagLen] != '\0') {
+        typeTagLen++;
+    }
+
+    std::string typeTags(buffer + typeTagStart, typeTagLen);
+
+    // Skip past type tags + null terminator + padding to 4-byte boundary.
+    offset = typeTagStart + typeTagLen + 1;
+    offset = (offset + 3) & ~3;
+
+    // Handle /tracking/eye/LeftRightPitchYaw (Vector4: leftPitch, leftYaw, rightPitch, rightYaw).
+    if (address == "/tracking/eye/LeftRightPitchYaw" && offset + 16 <= size) {
+        float values[4];
+        for (int i = 0; i < 4; i++) {
+            uint32_t intVal;
+            memcpy(&intVal, buffer + offset + i * 4, 4);
+            intVal = _byteswap_ulong(intVal);
+            memcpy(&values[i], &intVal, 4);
+        }
+        HandleLeftRightPitchYaw(values[0], values[1], values[2], values[3]);
+        return true;
+    }
+
+    return true;
+}
+
+void OSCClient::HandleLeftRightPitchYaw(float leftPitch, float leftYaw, float rightPitch, float rightYaw) {
+    if (!m_loggedFirstData.exchange(true)) {
+        openxr_api_layer::log::Log("OSC: Received first valid eye data via LeftRightPitchYaw\n");
+    }
+
+    auto now = std::chrono::steady_clock::now();
+
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+
+    // Convert pitch/yaw angles (radians) back to normalized [-1, 1] coordinates.
+    // VRCFT sends atan()-based angles; tan() recovers the original normalized values,
+    // allowing the existing NormalizedToUnitVector to work unchanged.
+    m_eyeLeftY = std::tan(-leftPitch / 180 * (float)M_PI);
+    m_eyeLeftX = std::tan(leftYaw / 180 * (float)M_PI);
+    m_eyeRightY = std::tan(-rightPitch / 180 * (float)M_PI);
+    m_eyeRightX = std::tan(rightYaw / 180 * (float)M_PI);
+
+    // Apply per-direction response curve exponents.
+    if (m_eyeLeftY > .0f) {
+        m_eyeLeftY = std::pow(m_eyeLeftY, m_eyeCurveExponentUp);
+    } else {
+        m_eyeLeftY = -std::pow(-m_eyeLeftY, m_eyeCurveExponentDown);
+    }
+    if (m_eyeRightY > .0f) {
+        m_eyeRightY = std::pow(m_eyeRightY, m_eyeCurveExponentUp);
+    } else {
+        m_eyeRightY = -std::pow(-m_eyeRightY, m_eyeCurveExponentDown);
+    }
+    if (m_eyeLeftX > .0f) {
+        m_eyeLeftX = std::pow(m_eyeLeftX, m_eyeCurveExponentRight);
+    } else {
+        m_eyeLeftX = -std::pow(-m_eyeLeftX, m_eyeCurveExponentLeft);
+    }
+    if (m_eyeRightX > .0f) {
+        m_eyeRightX = std::pow(m_eyeRightX, m_eyeCurveExponentRight);
+    } else {
+        m_eyeRightX = -std::pow(-m_eyeRightX, m_eyeCurveExponentLeft);
+    }
+
+    m_lastLeftEyeUpdate = now;
+    m_lastRightEyeUpdate = now;
+    m_hasValidLeftEye.store(true);
+    m_hasValidRightEye.store(true);
+}
+
+XrVector3f OSCClient::NormalizedToUnitVector(float x, float y) {
+    // Input: x, y in range [-1.0, 1.0]
+    // These represent gaze direction on a normalized plane.
+    // Convert to angles using atan to map uniformly across the field of view.
+    const float angleX = std::atan(x); // Horizontal angle (yaw)
+    const float angleY = std::atan(y); // Vertical angle (pitch)
+
+    // Convert spherical to Cartesian coordinates on unit sphere.
+    // OpenXR convention: x = right, y = up, z = backward.
+    const float cosY = std::cos(angleY);
+    XrVector3f result;
+    result.x = std::sin(angleX) * cosY;
+    result.y = std::sin(angleY);
+    result.z = -std::cos(angleX) * cosY; // Negative because +z is backward
+
+    // Normalize to ensure unit length.
+    const float len = std::sqrt(result.x * result.x + result.y * result.y + result.z * result.z);
+    if (len > 0.0001f) {
+        result.x /= len;
+        result.y /= len;
+        result.z /= len;
+    }
+
+    return result;
+}
