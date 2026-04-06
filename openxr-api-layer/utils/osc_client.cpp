@@ -208,7 +208,7 @@ bool OSCClient::ParseOSCMessage(const char* buffer, int size) {
     }
 
     std::string address(buffer, addrLen);
-
+    
     // Skip past address + null terminator + padding to 4-byte boundary.
     int offset = addrLen + 1;
     offset = (offset + 3) & ~3;
@@ -259,130 +259,50 @@ bool OSCClient::ParseOSCMessage(const char* buffer, int size) {
     offset = typeTagStart + typeTagLen + 1;
     offset = (offset + 3) & ~3;
 
-    // Parse arguments based on type tags.
-    int argIndex = 0;
-    for (char tag : typeTags) {
-        if (offset + 4 > size) {
-            break;
-        }
-
-        if (tag == 'f') {
-            // 32-bit float, big-endian.
+    // Handle /tracking/eye/LeftRightPitchYaw (Vector4: leftPitch, leftYaw, rightPitch, rightYaw).
+    if (address == "/tracking/eye/LeftRightPitchYaw" && offset + 16 <= size) {
+        float values[4];
+        for (int i = 0; i < 4; i++) {
             uint32_t intVal;
-            memcpy(&intVal, buffer + offset, 4);
+            memcpy(&intVal, buffer + offset + i * 4, 4);
             intVal = _byteswap_ulong(intVal);
-            float value;
-            memcpy(&value, &intVal, 4);
-
-            UpdateEyeParameter(address.c_str(), value);
-            argIndex++;
-            offset += 4;
-        } else if (tag == 'i') {
-            // 32-bit int, big-endian - skip.
-            offset += 4;
-            argIndex++;
-        } else if (tag == 's') {
-            // String - skip past null-terminated + padding.
-            int strLen = 0;
-            while (offset + strLen < size && buffer[offset + strLen] != '\0') {
-                strLen++;
-            }
-            offset += strLen + 1;
-            offset = (offset + 3) & ~3;
-            argIndex++;
-        } else if (tag == 'b') {
-            // Blob - skip.
-            if (offset + 4 > size) {
-                break;
-            }
-            uint32_t blobSize;
-            memcpy(&blobSize, buffer + offset, 4);
-            blobSize = _byteswap_ulong(blobSize);
-            offset += 4;
-            offset += blobSize;
-            offset = (offset + 3) & ~3;
-            argIndex++;
-        } else {
-            // Unknown type, skip.
-            break;
+            memcpy(&values[i], &intVal, 4);
         }
+        HandleLeftRightPitchYaw(values[0], values[1], values[2], values[3]);
+        return true;
     }
 
     return true;
 }
 
-void OSCClient::UpdateEyeParameter(const char* address, float value) {
-    // Match VRCFT Unified Expressions parameters.
-    // Address patterns: /avatar/parameters/v2/EyeLeftX, etc.
-
-    bool isLeft = false;
-    bool isHorizontal = false;
-    bool isBoth = false;
-    bool matched = false;
-
-    if (strstr(address, "v2/EyeLeftX") != nullptr) {
-        isLeft = true;
-        isHorizontal = true;
-        matched = true;
-    } else if (strstr(address, "v2/EyeLeftY") != nullptr) {
-        isLeft = true;
-        isHorizontal = false;
-        matched = true;
-    } else if (strstr(address, "v2/EyeRightX") != nullptr) {
-        isLeft = false;
-        isHorizontal = true;
-        matched = true;
-    } else if (strstr(address, "v2/EyeRightY") != nullptr) {
-        isLeft = false;
-        isHorizontal = false;
-        matched = true;
-    } else if (strstr(address, "v2/EyeX") != nullptr) {
-        isBoth = true;
-        isHorizontal = true;
-        matched = true;
-    } else if (strstr(address, "v2/EyeY") != nullptr) {
-        isBoth = true;
-        isHorizontal = false;
-        matched = true;
-    }
-
-    if (!matched) {
-        return;
-    }
-
+void OSCClient::HandleLeftRightPitchYaw(float leftPitch, float leftYaw, float rightPitch, float rightYaw) {
     if (!m_loggedFirstData.exchange(true)) {
-        openxr_api_layer::log::Log(fmt::format("OSC: Received first valid eye data on {}\n", address));
+        openxr_api_layer::log::Log("OSC: Received first valid eye data via LeftRightPitchYaw\n");
     }
 
     auto now = std::chrono::steady_clock::now();
 
     std::lock_guard<std::mutex> lock(m_dataMutex);
 
-    if (isLeft || isBoth) {
-        if (isHorizontal) {
-            m_eyeLeftX = value;
-        } else {
-            m_eyeLeftY = value;
-            if (m_eyeLeftY > .0f) {
-                m_eyeLeftY *= m_eyeYUpScale;
-            }
-        }
-        m_lastLeftEyeUpdate = now;
-        m_hasValidLeftEye.store(true);
+    // Convert pitch/yaw angles (radians) back to normalized [-1, 1] coordinates.
+    // VRCFT sends atan()-based angles; tan() recovers the original normalized values,
+    // allowing the existing NormalizedToUnitVector to work unchanged.
+    m_eyeLeftY = std::tan(-leftPitch / 180 * M_PI);
+    m_eyeLeftX = std::tan(leftYaw / 180 * M_PI);
+    m_eyeRightY = std::tan(-rightPitch / 180 * M_PI);
+    m_eyeRightX = std::tan(rightYaw / 180 * M_PI);
+
+    if (m_eyeLeftY > .0f) {
+        m_eyeLeftY *= m_eyeYUpScale;
+    }
+    if (m_eyeRightY > .0f) {
+        m_eyeRightY *= m_eyeYUpScale;
     }
 
-    if (!isLeft || isBoth) {
-        if (isHorizontal) {
-            m_eyeRightX = value;
-        } else {
-            m_eyeRightY = value;
-            if (m_eyeRightY > .0f) {
-                m_eyeRightY *= m_eyeYUpScale;
-            }
-        }
-        m_lastRightEyeUpdate = now;
-        m_hasValidRightEye.store(true);
-    }
+    m_lastLeftEyeUpdate = now;
+    m_lastRightEyeUpdate = now;
+    m_hasValidLeftEye.store(true);
+    m_hasValidRightEye.store(true);
 }
 
 XrVector3f OSCClient::NormalizedToUnitVector(float x, float y) {

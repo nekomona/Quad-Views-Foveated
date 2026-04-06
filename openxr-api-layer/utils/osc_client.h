@@ -76,7 +76,7 @@ class OSCClient {
 
     // OSC parsing.
     bool ParseOSCMessage(const char* buffer, int size);
-    void UpdateEyeParameter(const char* address, float value);
+    void HandleLeftRightPitchYaw(float leftPitch, float leftYaw, float rightPitch, float rightYaw);
 
     // Convert 2D normalized coordinates to 3D unit vector.
     static XrVector3f NormalizedToUnitVector(float x, float y);
