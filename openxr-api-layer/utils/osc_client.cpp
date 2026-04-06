@@ -213,24 +213,6 @@ bool OSCClient::ParseOSCMessage(const char* buffer, int size) {
         return false;
     }
 
-    // Check for type tag string.
-    if (buffer[offset] != ',') {
-        return false;
-    }
-
-    // Extract type tags.
-    int typeTagStart = offset + 1;
-    int typeTagLen = 0;
-    while (offset + typeTagLen < size && buffer[typeTagStart + typeTagLen] != '\0') {
-        typeTagLen++;
-    }
-
-    std::string typeTags(buffer + typeTagStart, typeTagLen);
-
-    // Skip past type tags + null terminator + padding to 4-byte boundary.
-    offset = typeTagStart + typeTagLen + 1;
-    offset = (offset + 3) & ~3;
-
     // Check if this is a bundle message (starts with "#bundle").
     if (address == "#bundle") {
         // Skip the 8-byte time tag.
@@ -254,6 +236,24 @@ bool OSCClient::ParseOSCMessage(const char* buffer, int size) {
         }
         return true;
     }
+
+    // Check for type tag string.
+    if (buffer[offset] != ',') {
+        return false;
+    }
+
+    // Extract type tags.
+    int typeTagStart = offset + 1;
+    int typeTagLen = 0;
+    while (offset + typeTagLen < size && buffer[typeTagStart + typeTagLen] != '\0') {
+        typeTagLen++;
+    }
+
+    std::string typeTags(buffer + typeTagStart, typeTagLen);
+
+    // Skip past type tags + null terminator + padding to 4-byte boundary.
+    offset = typeTagStart + typeTagLen + 1;
+    offset = (offset + 3) & ~3;
 
     // Parse arguments based on type tags.
     int argIndex = 0;
@@ -313,6 +313,7 @@ void OSCClient::UpdateEyeParameter(const char* address, float value) {
 
     bool isLeft = false;
     bool isHorizontal = false;
+    bool isBoth = false;
     bool matched = false;
 
     if (strstr(address, "v2/EyeLeftX") != nullptr) {
@@ -331,6 +332,14 @@ void OSCClient::UpdateEyeParameter(const char* address, float value) {
         isLeft = false;
         isHorizontal = false;
         matched = true;
+    } else if (strstr(address, "v2/EyeX") != nullptr) {
+        isBoth = true;
+        isHorizontal = true;
+        matched = true;
+    } else if (strstr(address, "v2/EyeY") != nullptr) {
+        isBoth = true;
+        isHorizontal = false;
+        matched = true;
     }
 
     if (!matched) {
@@ -345,7 +354,7 @@ void OSCClient::UpdateEyeParameter(const char* address, float value) {
 
     std::lock_guard<std::mutex> lock(m_dataMutex);
 
-    if (isLeft) {
+    if (isLeft || isBoth) {
         if (isHorizontal) {
             m_eyeLeftX = value;
         } else {
@@ -353,7 +362,9 @@ void OSCClient::UpdateEyeParameter(const char* address, float value) {
         }
         m_lastLeftEyeUpdate = now;
         m_hasValidLeftEye.store(true);
-    } else {
+    }
+
+    if (!isLeft || isBoth) {
         if (isHorizontal) {
             m_eyeRightX = value;
         } else {
